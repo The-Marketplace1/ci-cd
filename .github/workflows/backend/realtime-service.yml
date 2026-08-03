@@ -1,0 +1,76 @@
+name: Realtime Service
+
+on:
+  push:
+    branches: [main, develop]
+    paths: ['services/realtime-service/**', '.github/workflows/backend/realtime-service.yml']
+  pull_request:
+    branches: [main, develop]
+    paths: ['services/realtime-service/**']
+
+jobs:
+  ci:
+    name: CI
+    uses: ./.github/workflows/reusable/ci-backend.yml
+    with:
+      service-name: realtime-service
+      service-path: services/realtime-service
+      with-redis: true
+    secrets: inherit
+
+  security:
+    name: Security
+    uses: ./.github/workflows/reusable/security-scan.yml
+    with:
+      service-name: realtime-service
+      service-path: services/realtime-service
+    secrets: inherit
+
+  docker:
+    name: Docker
+    needs: [ci, security]
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/reusable/docker-build-push.yml
+    with:
+      service-name: realtime-service
+      service-path: services/realtime-service
+    secrets: inherit
+
+  deploy-development:
+    name: Deploy → Development
+    needs: docker
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/reusable/cd-deploy.yml
+    with:
+      service-name: realtime-service
+      ecs-service: realtime-service-service
+      ecs-cluster: development-cluster
+      image: ${{ needs.docker.outputs.image }}
+      environment: development
+    secrets: inherit
+
+  deploy-staging:
+    name: Deploy → Staging
+    needs: docker
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/reusable/cd-deploy.yml
+    with:
+      service-name: realtime-service
+      ecs-service: realtime-service-service
+      ecs-cluster: staging-cluster
+      image: ${{ needs.docker.outputs.image }}
+      environment: staging
+    secrets: inherit
+
+  deploy-production:
+    name: Deploy → Production
+    needs: deploy-staging
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/reusable/cd-deploy.yml
+    with:
+      service-name: realtime-service
+      ecs-service: realtime-service-service
+      ecs-cluster: production-cluster
+      image: ${{ needs.docker.outputs.image }}
+      environment: production
+    secrets: inherit

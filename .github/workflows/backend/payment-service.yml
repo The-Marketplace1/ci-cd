@@ -1,0 +1,84 @@
+name: Payment Service
+
+on:
+  push:
+    branches: [main, develop]
+    paths: ['services/payment-service/**', '.github/workflows/backend/payment-service.yml']
+  pull_request:
+    branches: [main, develop]
+    paths: ['services/payment-service/**']
+
+jobs:
+  ci:
+    name: CI
+    uses: ./.github/workflows/reusable/ci-backend.yml
+    with:
+      service-name: payment-service
+      service-path: services/payment-service
+      with-postgres: true
+      coverage-threshold: 90
+    secrets: inherit
+
+  security:
+    name: Security
+    uses: ./.github/workflows/reusable/security-scan.yml
+    with:
+      service-name: payment-service
+      service-path: services/payment-service
+      run-codeql: true
+      run-secret-scan: true
+      run-trivy: true
+      run-license-check: true
+    secrets: inherit
+
+  docker:
+    name: Docker
+    needs: [ci, security]
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/reusable/docker-build-push.yml
+    with:
+      service-name: payment-service
+      service-path: services/payment-service
+    secrets: inherit
+
+  deploy-development:
+    name: Deploy → Development
+    needs: docker
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/reusable/cd-deploy.yml
+    with:
+      service-name: payment-service
+      ecs-service: payment-service-service
+      ecs-cluster: development-cluster
+      image: ${{ needs.docker.outputs.image }}
+      environment: development
+      run-migrations: true
+    secrets: inherit
+
+  deploy-staging:
+    name: Deploy → Staging
+    needs: docker
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/reusable/cd-deploy.yml
+    with:
+      service-name: payment-service
+      ecs-service: payment-service-service
+      ecs-cluster: staging-cluster
+      image: ${{ needs.docker.outputs.image }}
+      environment: staging
+      run-migrations: true
+    secrets: inherit
+
+  deploy-production:
+    name: Deploy → Production
+    needs: deploy-staging
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/reusable/cd-deploy.yml
+    with:
+      service-name: payment-service
+      ecs-service: payment-service-service
+      ecs-cluster: production-cluster
+      image: ${{ needs.docker.outputs.image }}
+      environment: production
+      run-migrations: true
+    secrets: inherit

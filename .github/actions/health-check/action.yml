@@ -1,0 +1,68 @@
+name: Health Check
+description: Verify that a deployed service is healthy after a deployment or rollback
+
+inputs:
+  service:
+    required: true
+    description: Service name
+  environment:
+    required: true
+    description: "Target environment (development | testing | staging | production)"
+  path:
+    required: false
+    default: /health
+    description: Health check endpoint path
+  retries:
+    required: false
+    default: "10"
+    description: Number of retry attempts
+  retry-delay:
+    required: false
+    default: "15"
+    description: Seconds between retries
+
+outputs:
+  healthy:
+    description: "true if the service responded healthy"
+    value: ${{ steps.check.outputs.healthy }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve service URL
+      id: url
+      shell: bash
+      run: |
+        case "${{ inputs.environment }}" in
+          development) BASE_URL="https://dev.${{ inputs.service }}.internal" ;;
+          testing)     BASE_URL="https://test.${{ inputs.service }}.internal" ;;
+          staging)     BASE_URL="https://staging.${{ inputs.service }}.marketplace.io" ;;
+          production)  BASE_URL="https://${{ inputs.service }}.marketplace.io" ;;
+          *) echo "Unknown environment: ${{ inputs.environment }}"; exit 1 ;;
+        esac
+        echo "url=${BASE_URL}${{ inputs.path }}" >> $GITHUB_OUTPUT
+
+    - name: Wait for service to become healthy
+      id: check
+      shell: bash
+      run: |
+        URL="${{ steps.url.outputs.url }}"
+        RETRIES=${{ inputs.retries }}
+        DELAY=${{ inputs.retry-delay }}
+        ATTEMPT=0
+
+        echo "Checking health at $URL (up to $RETRIES attempts, ${DELAY}s delay)"
+
+        until curl -sf --max-time 10 "$URL" > /dev/null 2>&1; do
+          ATTEMPT=$((ATTEMPT + 1))
+          if [ $ATTEMPT -ge $RETRIES ]; then
+            echo "❌ Service ${{ inputs.service }} did not become healthy after $RETRIES attempts"
+            echo "healthy=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          echo "  Attempt $ATTEMPT/$RETRIES failed — retrying in ${DELAY}s..."
+          sleep $DELAY
+        done
+
+        echo "✔ Service ${{ inputs.service }} is healthy"
+        echo "healthy=true" >> $GITHUB_OUTPUT

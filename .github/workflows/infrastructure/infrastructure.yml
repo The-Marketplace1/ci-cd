@@ -1,0 +1,39 @@
+name: Infrastructure CI
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'terraform/**'
+      - 'kubernetes/**'
+      - 'helm/**'
+      - '.github/workflows/infrastructure/infrastructure.yml'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'terraform/**'
+      - 'kubernetes/**'
+      - 'helm/**'
+
+jobs:
+  ci:
+    name: Infrastructure CI
+    uses: ./.github/workflows/reusable/ci-infrastructure.yml
+    with:
+      tf-path: terraform
+      k8s-path: kubernetes
+      helm-path: helm
+      terraform-version: "1.9.0"
+    secrets: inherit
+
+  security:
+    name: Security Scan
+    uses: ./.github/workflows/reusable/security-scan.yml
+    with:
+      service-name: infrastructure
+      service-path: .
+      run-codeql: false
+      run-trivy: false
+      run-secret-scan: true
+      run-license-check: false
+    secrets: inherit

@@ -1,0 +1,100 @@
+name: Reusable — CD Rollback
+
+on:
+  workflow_call:
+    inputs:
+      service-name:
+        required: true
+        type: string
+      ecs-service:
+        required: true
+        type: string
+      ecs-cluster:
+        required: true
+        type: string
+      environment:
+        required: true
+        type: string
+      target-revision:
+        required: false
+        type: string
+        default: ""
+        description: "Specific task definition revision — leave empty to roll back to previous"
+    outputs:
+      rolled-back:
+        value: ${{ jobs.rollback.outputs.rolled-back }}
+
+jobs:
+  rollback:
+    name: Rollback ${{ inputs.service-name }} in ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    outputs:
+      rolled-back: ${{ steps.result.outputs.rolled-back }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Resolve rollback target revision
+        id: revision
+        run: |
+          if [ -n "${{ inputs.target-revision }}" ]; then
+            REVISION="${{ inputs.target-revision }}"
+            echo "Using specified revision: $REVISION"
+          else
+            CURRENT_ARN=$(aws ecs describe-services \
+              --cluster ${{ inputs.ecs-cluster }} \
+              --services ${{ inputs.ecs-service }} \
+              --query 'services[0].taskDefinition' \
+              --output text)
+            CURRENT=$(echo "$CURRENT_ARN" | grep -oP ':\d+$' | tr -d ':')
+            REVISION=$((CURRENT - 1))
+            echo "Rolling back from revision $CURRENT to $REVISION"
+          fi
+          echo "revision=$REVISION" >> $GITHUB_OUTPUT
+          echo "task-def=${{ inputs.ecs-service }}:$REVISION" >> $GITHUB_OUTPUT
+
+      - name: Restore previous task definition
+        run: |
+          echo "Restoring ${{ steps.revision.outputs.task-def }}"
+          aws ecs update-service \
+            --cluster ${{ inputs.ecs-cluster }} \
+            --service ${{ inputs.ecs-service }} \
+            --task-definition ${{ steps.revision.outputs.task-def }} \
+            --force-new-deployment
+          aws ecs wait services-stable \
+            --cluster ${{ inputs.ecs-cluster }} \
+            --services ${{ inputs.ecs-service }}
+
+      - name: Verify application health after rollback
+        uses: ./.github/actions/health-check
+        with:
+          service: ${{ inputs.service-name }}
+          environment: ${{ inputs.environment }}
+
+      - name: Tag rollback in git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          TAG="rollback/${{ inputs.service-name }}/${{ inputs.environment }}/$(date +%Y%m%dT%H%M%S)"
+          git tag "$TAG"
+          git push origin "$TAG"
+
+      - id: result
+        run: echo "rolled-back=true" >> $GITHUB_OUTPUT
+
+      - name: Notify rollback
+        if: always()
+        uses: ./.github/actions/notify
+        with:
+          status: ${{ job.status }}
+          service: ${{ inputs.service-name }}
+          environment: ${{ inputs.environment }}
+          event: rollback
+          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}

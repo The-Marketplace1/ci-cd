@@ -1,0 +1,124 @@
+name: Reusable — Docker Build & Push
+
+on:
+  workflow_call:
+    inputs:
+      service-name:
+        required: true
+        type: string
+      service-path:
+        required: true
+        type: string
+      dockerfile:
+        required: false
+        type: string
+        default: ""
+      build-args:
+        required: false
+        type: string
+        default: ""
+      platforms:
+        required: false
+        type: string
+        default: "linux/amd64"
+      push:
+        required: false
+        type: boolean
+        default: true
+      scan-image:
+        required: false
+        type: boolean
+        default: true
+    outputs:
+      image:
+        description: "Full image URI with SHA tag"
+        value: ${{ jobs.build.outputs.image }}
+      digest:
+        description: "Image digest"
+        value: ${{ jobs.build.outputs.digest }}
+
+jobs:
+  build:
+    name: Build & Push — ${{ inputs.service-name }}
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.image.outputs.value }}
+      digest: ${{ steps.push.outputs.digest }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU (multi-arch)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Compute image tags & labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.login-ecr.outputs.registry }}/${{ inputs.service-name }}
+          tags: |
+            type=raw,value=${{ github.sha }}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: Set immutable image reference
+        id: image
+        run: echo "value=${{ steps.login-ecr.outputs.registry }}/${{ inputs.service-name }}:${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ inputs.service-path }}
+          file: ${{ inputs.dockerfile || format('{0}/Dockerfile', inputs.service-path) }}
+          platforms: ${{ inputs.platforms }}
+          push: ${{ inputs.push }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: ${{ inputs.build-args }}
+          cache-from: type=gha,scope=${{ inputs.service-name }}
+          cache-to: type=gha,mode=max,scope=${{ inputs.service-name }}
+
+      - name: Trivy image scan
+        if: inputs.scan-image && inputs.push
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: image
+          image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ inputs.service-name }}:${{ github.sha }}
+          format: sarif
+          output: trivy-image.sarif
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+
+      - name: Upload Trivy SARIF
+        if: always() && inputs.scan-image && inputs.push
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image-${{ inputs.service-name }}
+
+      - name: Image build summary
+        run: |
+          echo "## Docker Image Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Service | \`${{ inputs.service-name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Image | \`${{ steps.image.outputs.value }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Digest | \`${{ steps.push.outputs.digest }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| SHA Tag | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY

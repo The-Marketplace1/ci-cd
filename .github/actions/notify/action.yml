@@ -1,0 +1,82 @@
+name: Notify
+description: Send a pipeline notification via Slack
+
+inputs:
+  status:
+    required: true
+    description: "Job status: success | failure | cancelled"
+  service:
+    required: true
+    description: Service or app name
+  environment:
+    required: true
+    description: Target environment
+  event:
+    required: true
+    description: "Event type: deployment | rollback | release | security"
+  webhook-url:
+    required: true
+    description: Slack incoming webhook URL
+  message:
+    required: false
+    default: ""
+    description: Optional custom message override
+
+runs:
+  using: composite
+  steps:
+    - name: Build notification payload
+      id: payload
+      shell: bash
+      run: |
+        STATUS="${{ inputs.status }}"
+        EVENT="${{ inputs.event }}"
+        SERVICE="${{ inputs.service }}"
+        ENV="${{ inputs.environment }}"
+        SHA="${{ github.sha }}"
+        ACTOR="${{ github.actor }}"
+        RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+        case "$STATUS" in
+          success)  ICON="✅" ; COLOR="#2eb886" ;;
+          failure)  ICON="❌" ; COLOR="#ff0000" ;;
+          cancelled) ICON="⚪" ; COLOR="#cccccc" ;;
+          *)        ICON="ℹ️" ; COLOR="#cccccc" ;;
+        esac
+
+        case "$EVENT" in
+          deployment) VERB="Deployed" ;;
+          rollback)   VERB="Rolled back" ;;
+          release)    VERB="Released" ;;
+          security)   VERB="Security scan" ;;
+          *)          VERB="Pipeline" ;;
+        esac
+
+        CUSTOM="${{ inputs.message }}"
+        if [ -n "$CUSTOM" ]; then
+          TEXT="$CUSTOM"
+        else
+          TEXT="$ICON *$VERB* \`$SERVICE\` → \`$ENV\` — commit \`${SHA:0:8}\` | actor: $ACTOR"
+        fi
+
+        {
+          echo "text<<EOF"
+          echo "$TEXT"
+          echo "EOF"
+          echo "color=$COLOR"
+          echo "run_url=$RUN_URL"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Send Slack notification
+      shell: bash
+      run: |
+        jq -n \
+          --arg color "${{ steps.payload.outputs.color }}" \
+          --arg text "${{ steps.payload.outputs.text }}" \
+          --arg url "${{ steps.payload.outputs.run_url }}" \
+          --argjson timestamp "$(date +%s)" \
+          '{attachments: [{color: $color, text: $text, footer: ("<" + $url + "|View Run>"), ts: $timestamp}]}' \
+          | curl -sf -X POST \
+              -H 'Content-type: application/json' \
+              --data @- \
+              "${{ inputs.webhook-url }}"

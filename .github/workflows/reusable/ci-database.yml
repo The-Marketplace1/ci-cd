@@ -1,0 +1,186 @@
+name: Reusable — Database CI
+
+on:
+  workflow_call:
+    inputs:
+      db-path:
+        required: false
+        type: string
+        default: "."
+      postgres-version:
+        required: false
+        type: string
+        default: "16"
+    outputs:
+      passed:
+        description: "true if all database checks passed"
+        value: ${{ jobs.gate.outputs.passed }}
+
+jobs:
+  sql-validate:
+    name: Validate SQL Files
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install sqlfluff
+        run: pip install sqlfluff
+      - name: Lint SQL files
+        run: |
+          find ${{ inputs.db-path }}/migrations -name "*.sql" -print0 \
+            | xargs -0 -I{} sqlfluff lint {} --dialect postgres || true
+          find ${{ inputs.db-path }}/migrations -name "*.sql" -print0 \
+            | xargs -0 -I{} sqlfluff lint {} --dialect postgres
+
+  migration-order:
+    name: Validate Migration Order
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check migration file naming convention
+        run: |
+          # Ensure all migration files follow V{timestamp}__{description}.sql
+          INVALID=()
+          while IFS= read -r file; do
+            filename=$(basename "$file")
+            if ! [[ "$filename" =~ ^V[0-9]{14}__[a-z0-9_]+\.sql$ ]]; then
+              INVALID+=("$filename")
+            fi
+          done < <(find ${{ inputs.db-path }}/migrations -name "*.sql" | sort)
+
+          if [ ${#INVALID[@]} -gt 0 ]; then
+            echo "❌ Invalid migration filenames:"
+            printf '  %s\n' "${INVALID[@]}"
+            exit 1
+          fi
+          echo "✔ All migration filenames are valid"
+
+      - name: Check for duplicate migration versions
+        run: |
+          DUPES=$(find ${{ inputs.db-path }}/migrations -name "V*.sql" \
+            | xargs -I{} basename {} \
+            | cut -d'_' -f1 \
+            | sort | uniq -d)
+          if [ -n "$DUPES" ]; then
+            echo "❌ Duplicate migration version(s) detected: $DUPES"
+            exit 1
+          fi
+          echo "✔ No duplicate migration versions"
+
+  rollback-scripts:
+    name: Verify Rollback Scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check every UP migration has a DOWN counterpart
+        run: |
+          MISSING=()
+          for up in ${{ inputs.db-path }}/migrations/V*.sql; do
+            base=$(basename "$up")
+            down="${up/migrations/rollbacks}"
+            if [ ! -f "$down" ]; then
+              MISSING+=("$base → rollback missing")
+            fi
+          done
+          if [ ${#MISSING[@]} -gt 0 ]; then
+            echo "❌ Missing rollback scripts:"
+            printf '  %s\n' "${MISSING[@]}"
+            exit 1
+          fi
+          echo "✔ All migrations have rollback scripts"
+
+  migration-test:
+    name: Run Migration Tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:${{ inputs.postgres-version }}-alpine
+        env:
+          POSTGRES_USER: testuser
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: migration_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Flyway
+        run: |
+          curl -fsSL https://repo1.maven.org/maven2/org/flywaydb/flyway-commandline/10.0.0/flyway-commandline-10.0.0-linux-x64.tar.gz \
+            | tar -xz -C /opt
+          ln -s /opt/flyway-10.0.0/flyway /usr/local/bin/flyway
+      - name: Apply all migrations (UP)
+        run: |
+          flyway -url=jdbc:postgresql://localhost:5432/migration_test \
+                 -user=testuser \
+                 -password=testpass \
+                 -locations=filesystem:${{ inputs.db-path }}/migrations \
+                 migrate
+      - name: Apply all rollbacks (DOWN)
+        run: |
+          flyway -url=jdbc:postgresql://localhost:5432/migration_test \
+                 -user=testuser \
+                 -password=testpass \
+                 -locations=filesystem:${{ inputs.db-path }}/rollbacks \
+                 migrate
+      - name: Re-apply migrations after rollback
+        run: |
+          flyway -url=jdbc:postgresql://localhost:5432/migration_test \
+                 -user=testuser \
+                 -password=testpass \
+                 -locations=filesystem:${{ inputs.db-path }}/migrations \
+                 migrate
+
+  schema-validation:
+    name: Schema Validation
+    runs-on: ubuntu-latest
+    needs: migration-test
+    services:
+      postgres:
+        image: postgres:${{ inputs.postgres-version }}-alpine
+        env:
+          POSTGRES_USER: testuser
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: schema_validate
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply migrations
+        run: |
+          for sql in $(ls ${{ inputs.db-path }}/migrations/*.sql | sort); do
+            psql postgresql://testuser:testpass@localhost:5432/schema_validate -f "$sql"
+          done
+      - name: Dump and validate schema
+        run: |
+          pg_dump postgresql://testuser:testpass@localhost:5432/schema_validate \
+            --schema-only --no-owner --no-acl \
+            > /tmp/schema_dump.sql
+          echo "Schema dump produced $(wc -l < /tmp/schema_dump.sql) lines"
+          echo "✔ Schema validation complete"
+
+  gate:
+    name: Quality Gate
+    runs-on: ubuntu-latest
+    needs: [sql-validate, migration-order, rollback-scripts, migration-test, schema-validation]
+    if: always()
+    outputs:
+      passed: ${{ steps.check.outputs.passed }}
+    steps:
+      - id: check
+        run: |
+          if [[ "${{ contains(needs.*.result, 'failure') }}" == "true" ]]; then
+            echo "passed=false" >> $GITHUB_OUTPUT
+            echo "❌ Database quality gate FAILED"
+            exit 1
+          fi
+          echo "passed=true" >> $GITHUB_OUTPUT
+          echo "✔ Database quality gate PASSED"

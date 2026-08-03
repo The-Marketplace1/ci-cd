@@ -1,0 +1,76 @@
+name: API Gateway
+
+on:
+  push:
+    branches: [main, develop]
+    paths: ['services/api-gateway/**', '.github/workflows/backend/api-gateway.yml']
+  pull_request:
+    branches: [main, develop]
+    paths: ['services/api-gateway/**']
+
+jobs:
+  ci:
+    name: CI
+    uses: ./.github/workflows/reusable/ci-backend.yml
+    with:
+      service-name: api-gateway
+      service-path: services/api-gateway
+      with-redis: true
+    secrets: inherit
+
+  security:
+    name: Security
+    uses: ./.github/workflows/reusable/security-scan.yml
+    with:
+      service-name: api-gateway
+      service-path: services/api-gateway
+    secrets: inherit
+
+  docker:
+    name: Docker
+    needs: [ci, security]
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/reusable/docker-build-push.yml
+    with:
+      service-name: api-gateway
+      service-path: services/api-gateway
+    secrets: inherit
+
+  deploy-development:
+    name: Deploy → Development
+    needs: docker
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/reusable/cd-deploy.yml
+    with:
+      service-name: api-gateway
+      ecs-service: api-gateway-service
+      ecs-cluster: development-cluster
+      image: ${{ needs.docker.outputs.image }}
+      environment: development
+    secrets: inherit
+
+  deploy-staging:
+    name: Deploy → Staging
+    needs: docker
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/reusable/cd-deploy.yml
+    with:
+      service-name: api-gateway
+      ecs-service: api-gateway-service
+      ecs-cluster: staging-cluster
+      image: ${{ needs.docker.outputs.image }}
+      environment: staging
+    secrets: inherit
+
+  deploy-production:
+    name: Deploy → Production
+    needs: deploy-staging
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/reusable/cd-deploy.yml
+    with:
+      service-name: api-gateway
+      ecs-service: api-gateway-service
+      ecs-cluster: production-cluster
+      image: ${{ needs.docker.outputs.image }}
+      environment: production
+    secrets: inherit

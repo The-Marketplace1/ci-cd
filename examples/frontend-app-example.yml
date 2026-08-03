@@ -1,0 +1,52 @@
+name: Example — Storefront Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'apps/storefront/**'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'apps/storefront/**'
+
+jobs:
+  ci:
+    uses: ./.github/workflows/reusable/ci-frontend.yml
+    with:
+      app-name: storefront
+      app-path: apps/storefront
+      coverage-threshold: 75
+      run-e2e: ${{ github.ref == 'refs/heads/main' }}
+      e2e-base-url: ${{ vars.STAGING_URL }}
+    secrets: inherit
+
+  security:
+    uses: ./.github/workflows/reusable/security-scan.yml
+    with:
+      service-name: storefront
+      service-path: apps/storefront
+    secrets: inherit
+
+  docker:
+    needs: [ci, security]
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/reusable/docker-build-push.yml
+    with:
+      service-name: storefront
+      service-path: apps/storefront
+      build-args: |
+        VITE_API_URL=${{ vars.VITE_API_URL }}
+    secrets: inherit
+
+  deploy-development:
+    needs: docker
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/reusable/cd-deploy.yml
+    with:
+      service-name: storefront
+      ecs-service: storefront-service
+      ecs-cluster: development-cluster
+      image: ${{ needs.docker.outputs.image }}
+      environment: development
+    secrets: inherit

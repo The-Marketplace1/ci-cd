@@ -1,0 +1,50 @@
+name: Monitoring Repository CI
+
+on:
+  push:
+    branches: [main, develop]
+    paths: ['**', '.github/workflows/monitoring/monitoring.yml']
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  lint-configs:
+    name: Lint Monitoring Configs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Prometheus config
+        run: |
+          if ls prometheus/*.yml 2>/dev/null; then
+            docker run --rm \
+              -v $PWD/prometheus:/etc/prometheus \
+              prom/prometheus \
+              --config.file=/etc/prometheus/prometheus.yml \
+              --check-config
+          fi
+      - name: Validate Grafana dashboards (JSON lint)
+        run: |
+          find . -name "*.json" -path "*/dashboards/*" | while read f; do
+            python3 -c "import json; json.load(open('$f'))" && echo "✔ $f" || exit 1
+          done
+      - name: Validate Alertmanager config
+        run: |
+          if ls alertmanager/*.yml 2>/dev/null; then
+            docker run --rm \
+              -v $PWD/alertmanager:/config \
+              prom/alertmanager \
+              --config.file=/config/alertmanager.yml \
+              check-config
+          fi
+
+  security:
+    name: Secret Scan
+    uses: ./.github/workflows/reusable/security-scan.yml
+    with:
+      service-name: monitoring
+      service-path: .
+      run-codeql: false
+      run-trivy: false
+      run-secret-scan: true
+      run-license-check: false
+    secrets: inherit

@@ -1,0 +1,30 @@
+name: Example — Call Reusable Backend CI
+
+on:
+  pull_request:
+    paths:
+      - 'services/inventory-service/**'
+  push:
+    branches: [develop, main]
+    paths:
+      - 'services/inventory-service/**'
+
+jobs:
+  ci:
+    uses: ./.github/workflows/reusable/ci-backend.yml
+    with:
+      service-name: inventory-service
+      service-path: services/inventory-service
+      with-postgres: true
+      with-redis: true
+      coverage-threshold: 80
+    secrets: inherit
+
+  security:
+    needs: ci
+    uses: ./.github/workflows/reusable/security-scan.yml
+    with:
+      service-name: inventory-service
+      service-path: services/inventory-service
+      language: javascript
+    secrets: inherit

@@ -1,0 +1,130 @@
+name: Reusable — Release
+
+on:
+  workflow_call:
+    inputs:
+      service-name:
+        required: true
+        type: string
+      release-type:
+        required: false
+        type: string
+        default: "auto"
+        description: "patch | minor | major | auto (reads conventional commits)"
+      dry-run:
+        required: false
+        type: boolean
+        default: false
+    outputs:
+      version:
+        description: "The new version string (e.g. 1.4.2)"
+        value: ${{ jobs.release.outputs.version }}
+      tag:
+        description: "The new git tag (e.g. auth-service@1.4.2)"
+        value: ${{ jobs.release.outputs.tag }}
+
+jobs:
+  release:
+    name: Release ${{ inputs.service-name }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+      tag: ${{ steps.bump.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install semver tools
+        run: npm install -g semver conventional-changelog-cli
+
+      - name: Determine current version
+        id: current
+        run: |
+          # Look for the latest tag for this service
+          LATEST=$(git tag --sort=-v:refname \
+            | grep "^${{ inputs.service-name }}@" \
+            | head -1 | sed "s/${{ inputs.service-name }}@//")
+          if [ -z "$LATEST" ]; then
+            LATEST="0.0.0"
+          fi
+          echo "version=$LATEST" >> $GITHUB_OUTPUT
+          echo "Current version: $LATEST"
+
+      - name: Bump version
+        id: bump
+        run: |
+          CURRENT="${{ steps.current.outputs.version }}"
+
+          if [ "${{ inputs.release-type }}" == "auto" ]; then
+            # Determine bump type from conventional commits since last tag
+            LAST_TAG="${{ inputs.service-name }}@${CURRENT}"
+            COMMITS=$(git log "${LAST_TAG}..HEAD" --pretty=format:"%s" 2>/dev/null || git log --pretty=format:"%s")
+
+            if echo "$COMMITS" | grep -qiE "^(feat|feature)(\(.+\))?!:|BREAKING CHANGE"; then
+              BUMP_TYPE="major"
+            elif echo "$COMMITS" | grep -qiE "^feat(\(.+\))?:"; then
+              BUMP_TYPE="minor"
+            else
+              BUMP_TYPE="patch"
+            fi
+            echo "Auto-detected bump type: $BUMP_TYPE"
+          else
+            BUMP_TYPE="${{ inputs.release-type }}"
+          fi
+
+          NEW_VERSION=$(semver -i $BUMP_TYPE $CURRENT)
+          NEW_TAG="${{ inputs.service-name }}@${NEW_VERSION}"
+          echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "tag=$NEW_TAG" >> $GITHUB_OUTPUT
+          echo "bump-type=$BUMP_TYPE" >> $GITHUB_OUTPUT
+          echo "New version: $NEW_VERSION (tag: $NEW_TAG)"
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          bash ci-cd/scripts/generate-changelog.sh \
+            --service ${{ inputs.service-name }} \
+            --from-tag "${{ inputs.service-name }}@${{ steps.current.outputs.version }}" \
+            --to HEAD \
+            --output CHANGELOG_FRAGMENT.md
+          cat CHANGELOG_FRAGMENT.md
+
+      - name: Create git tag
+        if: "!inputs.dry-run"
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.bump.outputs.tag }}" \
+            -m "Release ${{ steps.bump.outputs.tag }}"
+          git push origin "${{ steps.bump.outputs.tag }}"
+
+      - name: Create GitHub release
+        if: "!inputs.dry-run"
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.bump.outputs.tag }}
+          name: "${{ inputs.service-name }} v${{ steps.bump.outputs.version }}"
+          body_path: CHANGELOG_FRAGMENT.md
+          draft: false
+          prerelease: ${{ contains(steps.bump.outputs.version, '-rc') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Release summary
+        run: |
+          echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Service | ${{ inputs.service-name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Previous | ${{ steps.current.outputs.version }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| New | ${{ steps.bump.outputs.version }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Tag | \`${{ steps.bump.outputs.tag }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Dry run | ${{ inputs.dry-run }} |" >> $GITHUB_STEP_SUMMARY

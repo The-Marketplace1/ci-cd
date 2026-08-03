@@ -1,0 +1,30 @@
+name: Database Repository CI
+
+on:
+  push:
+    branches: [main, develop]
+    paths: ['**/*.sql', '**/migrations/**', '**/rollbacks/**', '.github/workflows/database/database.yml']
+  pull_request:
+    branches: [main, develop]
+    paths: ['**/*.sql', '**/migrations/**', '**/rollbacks/**']
+
+jobs:
+  ci:
+    name: Database CI
+    uses: ./.github/workflows/reusable/ci-database.yml
+    with:
+      db-path: .
+      postgres-version: "16"
+    secrets: inherit
+
+  security:
+    name: Security Scan
+    uses: ./.github/workflows/reusable/security-scan.yml
+    with:
+      service-name: database
+      service-path: .
+      run-codeql: false
+      run-trivy: false
+      run-secret-scan: true
+      run-license-check: false
+    secrets: inherit

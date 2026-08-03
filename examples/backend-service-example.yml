@@ -1,0 +1,64 @@
+name: Example — Inventory Service Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'services/inventory-service/**'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'services/inventory-service/**'
+
+jobs:
+  ci:
+    uses: ./.github/workflows/reusable/ci-backend.yml
+    with:
+      service-name: inventory-service
+      service-path: services/inventory-service
+      with-postgres: true
+      with-redis: true
+      coverage-threshold: 80
+    secrets: inherit
+
+  security:
+    uses: ./.github/workflows/reusable/security-scan.yml
+    with:
+      service-name: inventory-service
+      service-path: services/inventory-service
+    secrets: inherit
+
+  docker:
+    needs: [ci, security]
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/reusable/docker-build-push.yml
+    with:
+      service-name: inventory-service
+      service-path: services/inventory-service
+    secrets: inherit
+
+  deploy-development:
+    needs: docker
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/reusable/cd-deploy.yml
+    with:
+      service-name: inventory-service
+      ecs-service: inventory-service-service
+      ecs-cluster: development-cluster
+      image: ${{ needs.docker.outputs.image }}
+      environment: development
+      run-migrations: true
+    secrets: inherit
+
+  deploy-production:
+    needs: docker
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/reusable/cd-deploy.yml
+    with:
+      service-name: inventory-service
+      ecs-service: inventory-service-service
+      ecs-cluster: production-cluster
+      image: ${{ needs.docker.outputs.image }}
+      environment: production
+      run-migrations: true
+    secrets: inherit

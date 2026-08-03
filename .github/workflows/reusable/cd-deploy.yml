@@ -1,0 +1,145 @@
+name: Reusable — CD Deploy
+
+on:
+  workflow_call:
+    inputs:
+      service-name:
+        required: true
+        type: string
+      ecs-service:
+        required: true
+        type: string
+      ecs-cluster:
+        required: true
+        type: string
+      image:
+        required: true
+        type: string
+      environment:
+        required: true
+        type: string
+        description: "Target environment: development | testing | staging | production"
+      run-migrations:
+        required: false
+        type: boolean
+        default: false
+      health-check-path:
+        required: false
+        type: string
+        default: "/health"
+      smoke-test-url:
+        required: false
+        type: string
+        default: ""
+    outputs:
+      deployed:
+        description: "true if deployment succeeded"
+        value: ${{ jobs.deploy.outputs.deployed }}
+
+jobs:
+  validate-env:
+    name: Validate Environment
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate environment config
+        run: bash ci-cd/scripts/validate-env.sh --env ${{ inputs.environment }}
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      - name: Confirm image exists in registry
+        run: |
+          aws ecr describe-images \
+            --repository-name ${{ inputs.service-name }} \
+            --image-ids imageTag=${{ github.sha }} \
+            --query 'imageDetails[0].imageTags' \
+            --output text
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+
+  deploy:
+    name: Deploy → ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    needs: validate-env
+    environment: ${{ inputs.environment }}
+    outputs:
+      deployed: ${{ steps.result.outputs.deployed }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Download active task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition "${{ inputs.ecs-service }}" \
+            --query taskDefinition \
+            > task-definition.json
+
+      - name: Render task definition with new image
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: ${{ inputs.service-name }}
+          image: ${{ inputs.image }}
+
+      - name: Run database migrations
+        if: inputs.run-migrations
+        run: |
+          echo "Running migrations for ${{ inputs.service-name }} in ${{ inputs.environment }}"
+          aws ecs run-task \
+            --cluster ${{ inputs.ecs-cluster }} \
+            --task-definition ${{ inputs.ecs-service }}-migrate \
+            --launch-type FARGATE \
+            --wait-for-running
+
+      - name: Rolling deploy to ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.task-def.outputs.task-definition }}
+          service: ${{ inputs.ecs-service }}
+          cluster: ${{ inputs.ecs-cluster }}
+          wait-for-service-stability: true
+
+      - name: Health verification
+        uses: ./.github/actions/health-check
+        with:
+          service: ${{ inputs.service-name }}
+          environment: ${{ inputs.environment }}
+          path: ${{ inputs.health-check-path }}
+
+      - name: Smoke tests
+        if: inputs.smoke-test-url != ''
+        run: bash ci-cd/scripts/smoke-test.sh --url ${{ inputs.smoke-test-url }}
+
+      - name: Mark deployed
+        id: result
+        run: echo "deployed=true" >> $GITHUB_OUTPUT
+
+      - name: Auto-rollback on failure
+        if: failure()
+        run: |
+          echo "🔄 Deployment failed — triggering auto-rollback"
+          bash ci-cd/scripts/rollback-service.sh \
+            --service ${{ inputs.ecs-service }} \
+            --cluster ${{ inputs.ecs-cluster }}
+
+      - name: Notify
+        if: always()
+        uses: ./.github/actions/notify
+        with:
+          status: ${{ job.status }}
+          service: ${{ inputs.service-name }}
+          environment: ${{ inputs.environment }}
+          event: deployment
+          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}

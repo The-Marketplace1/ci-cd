@@ -1,0 +1,88 @@
+name: Docker Build
+description: Build a Docker image with layer caching via GitHub Actions cache
+
+inputs:
+  service-name:
+    required: true
+    description: Service name (used as ECR repository name and cache key)
+  context:
+    required: true
+    description: Docker build context path
+  dockerfile:
+    required: false
+    default: ""
+    description: Path to Dockerfile (defaults to <context>/Dockerfile)
+  build-args:
+    required: false
+    default: ""
+    description: Newline-separated Docker build-args
+  push:
+    required: false
+    default: "true"
+    description: Whether to push the image to ECR
+  platforms:
+    required: false
+    default: "linux/amd64"
+    description: Target platforms (comma-separated)
+  tags:
+    required: false
+    default: ""
+    description: Custom tags (defaults to SHA + latest on main)
+
+outputs:
+  image:
+    description: Full ECR image URI with SHA tag
+    value: ${{ steps.image-uri.outputs.uri }}
+  digest:
+    description: Image content digest
+    value: ${{ steps.push.outputs.digest }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Resolve image tags
+      id: tags
+      shell: bash
+      run: |
+        REGISTRY="${{ steps.login-ecr.outputs.registry }}"
+        REPO="${{ inputs.service-name }}"
+        SHA="${{ github.sha }}"
+        CUSTOM="${{ inputs.tags }}"
+        if [ -n "$CUSTOM" ]; then
+          echo "tags=$CUSTOM" >> $GITHUB_OUTPUT
+        else
+          TAGS="${REGISTRY}/${REPO}:${SHA}"
+          if [ "${{ github.ref }}" == "refs/heads/main" ]; then
+            TAGS="${TAGS},${REGISTRY}/${REPO}:latest"
+          fi
+          echo "tags=$TAGS" >> $GITHUB_OUTPUT
+        fi
+        echo "uri=${REGISTRY}/${REPO}:${SHA}" >> $GITHUB_OUTPUT
+
+    - name: Build and push
+      id: push
+      uses: docker/build-push-action@v5
+      with:
+        context: ${{ inputs.context }}
+        file: ${{ inputs.dockerfile || format('{0}/Dockerfile', inputs.context) }}
+        platforms: ${{ inputs.platforms }}
+        push: ${{ inputs.push }}
+        tags: ${{ steps.tags.outputs.tags }}
+        build-args: ${{ inputs.build-args }}
+        cache-from: type=gha,scope=${{ inputs.service-name }}
+        cache-to: type=gha,mode=max,scope=${{ inputs.service-name }}
+
+    - name: Export image URI
+      id: image-uri
+      shell: bash
+      run: echo "uri=${{ steps.tags.outputs.uri }}" >> $GITHUB_OUTPUT

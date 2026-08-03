@@ -1,0 +1,52 @@
+name: Create Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        required: true
+        type: choice
+        description: "Service or app to release"
+        options:
+          - api-gateway
+          - auth-service
+          - backend-api
+          - payment-service
+          - notification-service
+          - realtime-service
+          - communication-service
+          - customer-app
+          - professional-app
+          - admin-dashboard
+      release-type:
+        required: true
+        type: choice
+        default: auto
+        options: [auto, patch, minor, major]
+      dry-run:
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  release:
+    name: Release ${{ inputs.service }}
+    uses: ./.github/workflows/reusable/release.yml
+    with:
+      service-name: ${{ inputs.service }}
+      release-type: ${{ inputs.release-type }}
+      dry-run: ${{ inputs.dry-run }}
+    secrets: inherit
+
+  deploy-after-release:
+    name: Deploy to Production
+    needs: release
+    if: "!inputs.dry-run && needs.release.outputs.version != ''"
+    uses: ./.github/workflows/reusable/cd-deploy.yml
+    with:
+      service-name: ${{ inputs.service }}
+      ecs-service: ${{ inputs.service }}-service
+      ecs-cluster: production-cluster
+      image: ${{ secrets.ECR_REGISTRY }}/${{ inputs.service }}:${{ github.sha }}
+      environment: production
+    secrets: inherit

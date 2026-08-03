@@ -1,0 +1,107 @@
+name: __SERVICE_NAME__ CI/CD
+# ─────────────────────────────────────────────────────────────────────────────
+# HOW TO USE THIS TEMPLATE
+#
+# 1. Copy this file to one of:
+#      .github/workflows/backend/__service-name__.yml   (for services)
+#      .github/workflows/frontend/__app-name__.yml      (for apps)
+#
+# 2. Replace every __PLACEHOLDER__ with real values.
+#
+# 3. Choose the correct reusable CI workflow:
+#      backend:  ./.github/workflows/reusable/ci-backend.yml
+#      frontend: ./.github/workflows/reusable/ci-frontend.yml
+#
+# 4. Set `with-postgres` / `with-redis` only if your service needs them.
+#
+# 5. Commit and push — GitHub Actions will run automatically.
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - '__SERVICE_PATH__/**'
+      - '.github/workflows/__WORKFLOW_DIR__/__SERVICE_NAME__.yml'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - '__SERVICE_PATH__/**'
+
+jobs:
+  # ── Continuous Integration ──────────────────────────────────────────────────
+  ci:
+    name: CI
+    uses: ./.github/workflows/reusable/ci-backend.yml   # or ci-frontend.yml
+    with:
+      service-name: __SERVICE_NAME__
+      service-path: __SERVICE_PATH__
+      with-postgres: false      # set true if service needs Postgres
+      with-redis: false         # set true if service needs Redis
+      coverage-threshold: 80    # minimum line coverage %
+    secrets: inherit
+
+  # ── Security Scan ───────────────────────────────────────────────────────────
+  security:
+    name: Security
+    uses: ./.github/workflows/reusable/security-scan.yml
+    with:
+      service-name: __SERVICE_NAME__
+      service-path: __SERVICE_PATH__
+    secrets: inherit
+
+  # ── Docker Build & Push ─────────────────────────────────────────────────────
+  docker:
+    name: Docker
+    needs: [ci, security]
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/reusable/docker-build-push.yml
+    with:
+      service-name: __SERVICE_NAME__
+      service-path: __SERVICE_PATH__
+    secrets: inherit
+
+  # ── Deploy to Development ───────────────────────────────────────────────────
+  deploy-development:
+    name: Deploy → Development
+    needs: docker
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/reusable/cd-deploy.yml
+    with:
+      service-name: __SERVICE_NAME__
+      ecs-service: __ECS_SERVICE_NAME__
+      ecs-cluster: development-cluster
+      image: ${{ needs.docker.outputs.image }}
+      environment: development
+      run-migrations: false   # set true if service runs DB migrations
+    secrets: inherit
+
+  # ── Deploy to Staging ───────────────────────────────────────────────────────
+  deploy-staging:
+    name: Deploy → Staging
+    needs: docker
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/reusable/cd-deploy.yml
+    with:
+      service-name: __SERVICE_NAME__
+      ecs-service: __ECS_SERVICE_NAME__
+      ecs-cluster: staging-cluster
+      image: ${{ needs.docker.outputs.image }}
+      environment: staging
+      run-migrations: false
+    secrets: inherit
+
+  # ── Deploy to Production ────────────────────────────────────────────────────
+  deploy-production:
+    name: Deploy → Production
+    needs: deploy-staging
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/reusable/cd-deploy.yml
+    with:
+      service-name: __SERVICE_NAME__
+      ecs-service: __ECS_SERVICE_NAME__
+      ecs-cluster: production-cluster
+      image: ${{ needs.docker.outputs.image }}
+      environment: production
+      run-migrations: false
+    secrets: inherit

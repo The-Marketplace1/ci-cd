@@ -1,0 +1,122 @@
+name: Platform-wide Security Audit
+
+on:
+  schedule:
+    - cron: '0 2 * * 1'   # Every Monday 02:00 UTC
+  workflow_dispatch:
+
+jobs:
+  audit-backend:
+    name: Audit — ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - api-gateway
+          - auth-service
+          - backend-api
+          - payment-service
+          - notification-service
+          - realtime-service
+          - communication-service
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: services/${{ matrix.service }}
+          format: sarif
+          output: trivy-${{ matrix.service }}.sarif
+          severity: MEDIUM,HIGH,CRITICAL
+          exit-code: "0"   # Don't fail — just report
+      - uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-${{ matrix.service }}.sarif
+          category: weekly-audit-${{ matrix.service }}
+
+  audit-frontend:
+    name: Audit — ${{ matrix.app }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        app:
+          - customer-app
+          - professional-app
+          - admin-dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: apps/${{ matrix.app }}
+          format: sarif
+          output: trivy-${{ matrix.app }}.sarif
+          severity: MEDIUM,HIGH,CRITICAL
+          exit-code: "0"
+      - uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-${{ matrix.app }}.sarif
+          category: weekly-audit-${{ matrix.app }}
+
+  secret-scan-all:
+    name: Secret Scan — Full Repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  codeql-backend:
+    name: CodeQL — ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - api-gateway
+          - auth-service
+          - backend-api
+          - payment-service
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: javascript
+          queries: security-and-quality
+      - uses: github/codeql-action/autobuild@v3
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: weekly-codeql-${{ matrix.service }}
+
+  audit-summary:
+    name: Audit Summary
+    runs-on: ubuntu-latest
+    needs: [audit-backend, audit-frontend, secret-scan-all, codeql-backend]
+    if: always()
+    steps:
+      - name: Post summary
+        run: |
+          echo "## Weekly Security Audit Results" >> $GITHUB_STEP_SUMMARY
+          echo "| Job | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Backend Audit | ${{ needs.audit-backend.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Frontend Audit | ${{ needs.audit-frontend.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Secret Scan | ${{ needs.secret-scan-all.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| CodeQL | ${{ needs.codeql-backend.result }} |" >> $GITHUB_STEP_SUMMARY
+      - name: Notify security team
+        if: contains(needs.*.result, 'failure')
+        uses: 8398a7/action-slack@v3
+        with:
+          status: failure
+          text: "⚠️ Weekly security audit found issues — check GitHub Security tab"
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SECURITY_SLACK_WEBHOOK_URL }}

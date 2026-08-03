@@ -1,0 +1,57 @@
+name: __SERVICE_NAME__ — Manual Deploy / Rollback
+# ─────────────────────────────────────────────────────────────────────────────
+# Use this template for on-demand deployments and rollbacks triggered manually
+# from the GitHub Actions UI (workflow_dispatch).
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        required: true
+        type: choice
+        description: "Action to perform"
+        options: [deploy, rollback]
+      environment:
+        required: true
+        type: choice
+        description: "Target environment"
+        options: [development, testing, staging, production]
+      image-tag:
+        required: false
+        type: string
+        default: ""
+        description: "Docker image tag (SHA) for deploy — leave empty to use latest"
+      rollback-revision:
+        required: false
+        type: string
+        default: ""
+        description: "ECS task definition revision to roll back to (leave empty for previous)"
+
+jobs:
+  deploy:
+    name: Deploy → ${{ inputs.environment }}
+    if: inputs.action == 'deploy'
+    uses: ./.github/workflows/reusable/cd-deploy.yml
+    with:
+      service-name: __SERVICE_NAME__
+      ecs-service: __ECS_SERVICE_NAME__
+      ecs-cluster: ${{ inputs.environment }}-cluster
+      # Create ECR_REGISTRY as a GitHub Environment variable, for example:
+      # 123456789012.dkr.ecr.us-east-1.amazonaws.com
+      image: ${{ vars.ECR_REGISTRY }}/__ECR_REPO__:${{ inputs.image-tag || github.sha }}
+      environment: ${{ inputs.environment }}
+      run-migrations: false
+    secrets: inherit
+
+  rollback:
+    name: Rollback in ${{ inputs.environment }}
+    if: inputs.action == 'rollback'
+    uses: ./.github/workflows/reusable/cd-rollback.yml
+    with:
+      service-name: __SERVICE_NAME__
+      ecs-service: __ECS_SERVICE_NAME__
+      ecs-cluster: ${{ inputs.environment }}-cluster
+      environment: ${{ inputs.environment }}
+      target-revision: ${{ inputs.rollback-revision }}
+    secrets: inherit

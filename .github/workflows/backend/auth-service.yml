@@ -1,0 +1,85 @@
+name: Auth Service
+
+on:
+  push:
+    branches: [main, develop]
+    paths: ['services/auth-service/**', '.github/workflows/backend/auth-service.yml']
+  pull_request:
+    branches: [main, develop]
+    paths: ['services/auth-service/**']
+
+jobs:
+  ci:
+    name: CI
+    uses: ./.github/workflows/reusable/ci-backend.yml
+    with:
+      service-name: auth-service
+      service-path: services/auth-service
+      with-postgres: true
+      with-redis: true
+      coverage-threshold: 85
+    secrets: inherit
+
+  security:
+    name: Security
+    uses: ./.github/workflows/reusable/security-scan.yml
+    with:
+      service-name: auth-service
+      service-path: services/auth-service
+      # Auth service: strictest scanning
+      run-codeql: true
+      run-secret-scan: true
+      run-trivy: true
+    secrets: inherit
+
+  docker:
+    name: Docker
+    needs: [ci, security]
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/reusable/docker-build-push.yml
+    with:
+      service-name: auth-service
+      service-path: services/auth-service
+    secrets: inherit
+
+  deploy-development:
+    name: Deploy → Development
+    needs: docker
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/reusable/cd-deploy.yml
+    with:
+      service-name: auth-service
+      ecs-service: auth-service-service
+      ecs-cluster: development-cluster
+      image: ${{ needs.docker.outputs.image }}
+      environment: development
+      run-migrations: true
+    secrets: inherit
+
+  deploy-staging:
+    name: Deploy → Staging
+    needs: docker
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/reusable/cd-deploy.yml
+    with:
+      service-name: auth-service
+      ecs-service: auth-service-service
+      ecs-cluster: staging-cluster
+      image: ${{ needs.docker.outputs.image }}
+      environment: staging
+      run-migrations: true
+    secrets: inherit
+
+  deploy-production:
+    name: Deploy → Production
+    needs: deploy-staging
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/reusable/cd-deploy.yml
+    with:
+      service-name: auth-service
+      ecs-service: auth-service-service
+      ecs-cluster: production-cluster
+      image: ${{ needs.docker.outputs.image }}
+      environment: production
+      run-migrations: true
+    secrets: inherit

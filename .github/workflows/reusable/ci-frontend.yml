@@ -1,0 +1,214 @@
+name: Reusable — Frontend CI
+
+on:
+  workflow_call:
+    inputs:
+      app-name:
+        required: true
+        type: string
+        description: "Application name (e.g. customer-app)"
+      app-path:
+        required: true
+        type: string
+        description: "Relative path to the app directory (e.g. apps/customer-app)"
+      node-version:
+        required: false
+        type: string
+        default: "20"
+      pnpm-version:
+        required: false
+        type: string
+        default: "9"
+      coverage-threshold:
+        required: false
+        type: number
+        default: 75
+      run-e2e:
+        required: false
+        type: boolean
+        default: false
+      e2e-base-url:
+        required: false
+        type: string
+        default: ""
+    outputs:
+      passed:
+        description: "true if all jobs passed"
+        value: ${{ jobs.gate.outputs.passed }}
+
+jobs:
+  install:
+    name: Install
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ inputs.pnpm-version }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: pnpm
+          cache-dependency-path: ${{ inputs.app-path }}/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+        working-directory: ${{ inputs.app-path }}
+
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    needs: install
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ inputs.pnpm-version }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: pnpm
+          cache-dependency-path: ${{ inputs.app-path }}/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+        working-directory: ${{ inputs.app-path }}
+      - run: pnpm run lint
+        working-directory: ${{ inputs.app-path }}
+      - run: pnpm run format:check
+        working-directory: ${{ inputs.app-path }}
+
+  typecheck:
+    name: Typecheck
+    runs-on: ubuntu-latest
+    needs: install
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ inputs.pnpm-version }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: pnpm
+          cache-dependency-path: ${{ inputs.app-path }}/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+        working-directory: ${{ inputs.app-path }}
+      - run: pnpm run typecheck
+        working-directory: ${{ inputs.app-path }}
+
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: install
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ inputs.pnpm-version }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: pnpm
+          cache-dependency-path: ${{ inputs.app-path }}/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+        working-directory: ${{ inputs.app-path }}
+      - run: pnpm run test:coverage
+        working-directory: ${{ inputs.app-path }}
+        env:
+          NODE_ENV: test
+      - name: Check coverage threshold
+        run: |
+          THRESHOLD=${{ inputs.coverage-threshold }}
+          COVERAGE=$(jq '.total.lines.pct' coverage/coverage-summary.json)
+          echo "Coverage: $COVERAGE% (threshold: $THRESHOLD%)"
+          if (( $(echo "$COVERAGE < $THRESHOLD" | bc -l) )); then
+            echo "❌ Coverage below threshold"
+            exit 1
+          fi
+        working-directory: ${{ inputs.app-path }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.app-name }}-coverage
+          path: ${{ inputs.app-path }}/coverage/
+          retention-days: 14
+
+  build:
+    name: Production Build
+    runs-on: ubuntu-latest
+    needs: install
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ inputs.pnpm-version }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: pnpm
+          cache-dependency-path: ${{ inputs.app-path }}/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+        working-directory: ${{ inputs.app-path }}
+      - run: pnpm run build
+        working-directory: ${{ inputs.app-path }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.app-name }}-dist
+          path: ${{ inputs.app-path }}/dist/
+          retention-days: 7
+
+  e2e:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    needs: build
+    if: inputs.run-e2e && inputs.e2e-base-url != ''
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ inputs.pnpm-version }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: pnpm
+          cache-dependency-path: ${{ inputs.app-path }}/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+        working-directory: ${{ inputs.app-path }}
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install --with-deps
+        working-directory: ${{ inputs.app-path }}
+      - run: pnpm run test:e2e
+        working-directory: ${{ inputs.app-path }}
+        env:
+          PLAYWRIGHT_BASE_URL: ${{ inputs.e2e-base-url }}
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: ${{ inputs.app-name }}-playwright-report
+          path: ${{ inputs.app-path }}/playwright-report/
+          retention-days: 7
+
+  dependency-audit:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ inputs.pnpm-version }}
+      - run: pnpm audit --audit-level=high
+        working-directory: ${{ inputs.app-path }}
+
+  gate:
+    name: Quality Gate
+    runs-on: ubuntu-latest
+    needs: [lint, typecheck, test, build, dependency-audit]
+    if: always()
+    outputs:
+      passed: ${{ steps.check.outputs.passed }}
+    steps:
+      - id: check
+        run: |
+          if [[ "${{ contains(needs.*.result, 'failure') }}" == "true" ]]; then
+            echo "passed=false" >> $GITHUB_OUTPUT
+            echo "❌ Quality gate FAILED"
+            exit 1
+          fi
+          echo "passed=true" >> $GITHUB_OUTPUT
+          echo "✔ Quality gate PASSED"

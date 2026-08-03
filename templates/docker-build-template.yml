@@ -1,0 +1,48 @@
+name: __SERVICE_NAME__ — Docker Image
+# ─────────────────────────────────────────────────────────────────────────────
+# HOW TO USE THIS TEMPLATE
+#
+# Copy to `.github/workflows/docker-__service-name__.yml` in a service or app
+# repository, replace all __PLACEHOLDER__ values, and configure the required
+# AWS secrets in that repository or organization.
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - '__SERVICE_PATH__/**'
+      - 'Dockerfile'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  security-events: write
+
+jobs:
+  build-and-push:
+    name: Build and push image
+    uses: __CI_CD_REPOSITORY__/.github/workflows/reusable/docker-build-push.yml@main
+    with:
+      service-name: __SERVICE_NAME__
+      service-path: __SERVICE_PATH__
+      dockerfile: __DOCKERFILE_PATH__
+      platforms: linux/amd64
+      push: true
+      scan-image: true
+      build-args: |
+        # Example frontend build argument:
+        # VITE_API_URL=${{ vars.VITE_API_URL }}
+    secrets: inherit
+
+  summary:
+    name: Image summary
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "## Published image" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`${{ needs.build-and-push.outputs.image }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Digest: \`${{ needs.build-and-push.outputs.digest }}\`" >> "$GITHUB_STEP_SUMMARY"
